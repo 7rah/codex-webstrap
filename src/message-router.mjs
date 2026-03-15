@@ -72,6 +72,23 @@ const IPC_BROADCAST_FORWARD_METHODS = new Set([
   "workspace-root-options-updated"
 ]);
 
+const DEFAULT_SENTRY_INIT_OPTIONS = Object.freeze({
+  appVersion: "0.0.0",
+  buildNumber: null,
+  buildFlavor: "prod",
+  codexAppSessionId: null,
+  dsn: null
+});
+
+const DEFAULT_HOTKEY_WINDOW_STATE = Object.freeze({
+  supported: false,
+  isDevMode: false,
+  configuredHotkey: null,
+  isGateEnabled: false,
+  isActive: false,
+  isDevOverrideEnabled: false
+});
+
 class TerminalRegistry {
   constructor(sendToWs, logger) {
     this.sendToWs = sendToWs;
@@ -672,10 +689,14 @@ class TerminalRegistry {
 }
 
 class GitWorkerBridge {
-  constructor({ workerPath, sendWorkerEvent, logger }) {
+  constructor({ workerPath, sendWorkerEvent, logger, sentryInitOptions }) {
     this.workerPath = workerPath;
     this.sendWorkerEvent = sendWorkerEvent;
     this.logger = logger;
+    this.sentryInitOptions = {
+      ...DEFAULT_SENTRY_INIT_OPTIONS,
+      ...(sentryInitOptions && typeof sentryInitOptions === "object" ? sentryInitOptions : {})
+    };
     this.worker = null;
     this.pendingByRequestId = new Map();
   }
@@ -744,7 +765,7 @@ class GitWorkerBridge {
     this.worker = new Worker(this.workerPath, {
       workerData: {
         workerId: "git",
-        sentryInitOptions: {},
+        sentryInitOptions: this.sentryInitOptions,
         maxLogLevel: "info",
         sentryRewriteFramesRoot: process.cwd()
       }
@@ -776,7 +797,7 @@ class GitWorkerBridge {
 }
 
 export class MessageRouter {
-  constructor({ appServer, udsClient, workerPath, hostConfig, logger, globalStatePath }) {
+  constructor({ appServer, udsClient, workerPath, hostConfig, logger, globalStatePath, sentryInitOptions }) {
     this.logger = logger || createLogger("router");
     this.appServer = appServer;
     this.udsClient = udsClient;
@@ -819,7 +840,8 @@ export class MessageRouter {
         }
         this.broadcastWorkerEvent(workerId, payload);
       },
-      logger: this.logger
+      logger: this.logger,
+      sentryInitOptions
     });
 
     this._wireBackends();
@@ -1773,6 +1795,9 @@ export class MessageRouter {
         case "local-environments":
           payload = await this._resolveLocalEnvironments(params);
           break;
+        case "local-plugins":
+          payload = { plugins: [] };
+          break;
         case "has-custom-cli-executable":
           payload = { hasCustomCliExecutable: false };
           break;
@@ -1846,6 +1871,9 @@ export class MessageRouter {
           break;
         case "locale-info":
           payload = { ideLocale: null, systemLocale: null };
+          break;
+        case "hotkey-window-hotkey-state":
+          payload = { ...DEFAULT_HOTKEY_WINDOW_STATE };
           break;
         case "get-configuration":
           payload = { value: null };

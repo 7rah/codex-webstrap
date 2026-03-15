@@ -196,6 +196,7 @@ async function main() {
       kind: "local"
     },
     workerPath: assetBundle.workerPath,
+    sentryInitOptions: runtimeConfig.sentryInitOptions,
     logger: createLogger("router")
   });
 

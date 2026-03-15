@@ -721,6 +721,101 @@ test("local-environments lists workspace environment configs", async (t) => {
   router.dispose();
 });
 
+test("local-plugins returns an empty plugin list without logging an unhandled endpoint warning", async () => {
+  const warns = [];
+  const router = new MessageRouter({
+    appServer: null,
+    udsClient: null,
+    logger: {
+      warn(message, fields) {
+        warns.push({ message, fields });
+      },
+      info() {},
+      debug() {},
+      error() {}
+    }
+  });
+  const ws = createMockWs();
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "local-plugins",
+      method: "POST",
+      url: "vscode://codex/local-plugins",
+      body: JSON.stringify({
+        params: {
+          roots: ["/tmp/repo"]
+        }
+      })
+    }
+  });
+
+  const envelope = ws.sent[0];
+  assert.equal(envelope.type, "main-message");
+  assert.equal(envelope.payload.type, "fetch-response");
+  assert.equal(envelope.payload.status, 200);
+  assert.deepEqual(JSON.parse(envelope.payload.bodyJsonString), {
+    plugins: []
+  });
+  assert.equal(
+    warns.some((entry) => entry.message === "Unhandled vscode fetch endpoint"),
+    false
+  );
+
+  router.dispose();
+});
+
+test("hotkey-window-hotkey-state returns a fallback state without logging an unhandled endpoint warning", async () => {
+  const warns = [];
+  const router = new MessageRouter({
+    appServer: null,
+    udsClient: null,
+    logger: {
+      warn(message, fields) {
+        warns.push({ message, fields });
+      },
+      info() {},
+      debug() {},
+      error() {}
+    }
+  });
+  const ws = createMockWs();
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "hotkey-state",
+      method: "POST",
+      url: "vscode://codex/hotkey-window-hotkey-state",
+      body: JSON.stringify({
+        params: {}
+      })
+    }
+  });
+
+  const envelope = ws.sent[0];
+  assert.equal(envelope.type, "main-message");
+  assert.equal(envelope.payload.type, "fetch-response");
+  assert.equal(envelope.payload.status, 200);
+  assert.deepEqual(JSON.parse(envelope.payload.bodyJsonString), {
+    supported: false,
+    isDevMode: false,
+    configuredHotkey: null,
+    isGateEnabled: false,
+    isActive: false,
+    isDevOverrideEnabled: false
+  });
+  assert.equal(
+    warns.some((entry) => entry.message === "Unhandled vscode fetch endpoint"),
+    false
+  );
+
+  router.dispose();
+});
+
 test("gh-cli-status reflects installed + auth state", async () => {
   const router = new MessageRouter({ appServer: null, udsClient: null });
   const ws = createMockWs();
@@ -1366,4 +1461,84 @@ test("loads persisted atom and global state values from desktop global state fil
   });
 
   router.dispose();
+});
+
+test("git worker receives sentry init options from the router", async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cw-worker-test-"));
+  t.after(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  const workerPath = path.join(tempDir, "worker.mjs");
+  await fs.writeFile(
+    workerPath,
+    [
+      'import { parentPort, workerData } from "node:worker_threads";',
+      "",
+      'parentPort.on("message", (message) => {',
+      "  parentPort.postMessage({",
+      '    type: "worker-response",',
+      "    response: {",
+      '      id: message?.request?.id ?? "missing",',
+      "      result: {",
+      "        captured: workerData.sentryInitOptions",
+      "      }",
+      "    }",
+      "  });",
+      "});",
+      ""
+    ].join("\n")
+  );
+
+  const router = new MessageRouter({
+    appServer: null,
+    udsClient: null,
+    workerPath,
+    sentryInitOptions: {
+      appVersion: "26.311.21342",
+      buildNumber: "993",
+      buildFlavor: "prod",
+      codexAppSessionId: null,
+      dsn: null
+    }
+  });
+  const ws = createMockWs();
+
+  t.after(() => {
+    router.dispose();
+  });
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "worker-request",
+      workerId: "git",
+      request: {
+        id: "worker-probe",
+        method: "probe",
+        params: {}
+      }
+    }
+  });
+
+  let envelope = null;
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    envelope = ws.sent.find((entry) => (
+      entry.type === "worker-event"
+      && entry.workerId === "git"
+      && entry.payload?.response?.id === "worker-probe"
+    )) || null;
+    if (envelope) {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.ok(envelope);
+  assert.deepEqual(envelope.payload.response.result.captured, {
+    appVersion: "26.311.21342",
+    buildNumber: "993",
+    buildFlavor: "prod",
+    codexAppSessionId: null,
+    dsn: null
+  });
 });
