@@ -1395,6 +1395,170 @@ test("thread list responses are filtered to saved workspace roots", async () => 
   router.dispose();
 });
 
+test("set-thread-pinned persists pinned thread ids and broadcasts an update", async () => {
+  const router = new MessageRouter({ appServer: null, udsClient: null });
+  const ws = createMockWs();
+  router.registerClient(ws);
+  ws.sent = [];
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "pin-thread",
+      method: "POST",
+      url: "vscode://codex/set-thread-pinned",
+      body: JSON.stringify({
+        params: {
+          threadId: "thread-1",
+          pinned: true
+        }
+      })
+    }
+  });
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "list-pinned",
+      method: "POST",
+      url: "vscode://codex/list-pinned-threads",
+      body: JSON.stringify({
+        params: {}
+      })
+    }
+  });
+
+  const pinResponse = ws.sent.find((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "fetch-response"
+    && entry.payload?.requestId === "pin-thread"
+  ));
+  assert.ok(pinResponse);
+  assert.deepEqual(JSON.parse(pinResponse.payload.bodyJsonString), { ok: true });
+
+  const pinnedUpdated = ws.sent.find((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "pinned-threads-updated"
+  ));
+  assert.ok(pinnedUpdated);
+
+  const listResponse = ws.sent.find((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "fetch-response"
+    && entry.payload?.requestId === "list-pinned"
+  ));
+  assert.ok(listResponse);
+  assert.deepEqual(JSON.parse(listResponse.payload.bodyJsonString), {
+    threadIds: ["thread-1"]
+  });
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "unpin-thread",
+      method: "POST",
+      url: "vscode://codex/set-thread-pinned",
+      body: JSON.stringify({
+        params: {
+          threadId: "thread-1",
+          pinned: false
+        }
+      })
+    }
+  });
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "list-pinned-empty",
+      method: "POST",
+      url: "vscode://codex/list-pinned-threads",
+      body: JSON.stringify({
+        params: {}
+      })
+    }
+  });
+
+  const emptyListResponse = ws.sent.find((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "fetch-response"
+    && entry.payload?.requestId === "list-pinned-empty"
+  ));
+  assert.ok(emptyListResponse);
+  assert.deepEqual(JSON.parse(emptyListResponse.payload.bodyJsonString), {
+    threadIds: []
+  });
+
+  router.dispose();
+});
+
+test("set-pinned-threads-order updates the stored pin order", async () => {
+  const router = new MessageRouter({ appServer: null, udsClient: null });
+  const ws = createMockWs();
+
+  for (const threadId of ["thread-1", "thread-2"]) {
+    await router.handleEnvelope(ws, {
+      type: "view-message",
+      payload: {
+        type: "fetch",
+        requestId: `pin-${threadId}`,
+        method: "POST",
+        url: "vscode://codex/set-thread-pinned",
+        body: JSON.stringify({
+          params: {
+            threadId,
+            pinned: true
+          }
+        })
+      }
+    });
+  }
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "reorder-pinned",
+      method: "POST",
+      url: "vscode://codex/set-pinned-threads-order",
+      body: JSON.stringify({
+        params: {
+          threadIds: ["thread-2", "thread-1"]
+        }
+      })
+    }
+  });
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "list-pinned-after-reorder",
+      method: "POST",
+      url: "vscode://codex/list-pinned-threads",
+      body: JSON.stringify({
+        params: {}
+      })
+    }
+  });
+
+  const response = ws.sent.find((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "fetch-response"
+    && entry.payload?.requestId === "list-pinned-after-reorder"
+  ));
+  assert.ok(response);
+  assert.deepEqual(JSON.parse(response.payload.bodyJsonString), {
+    threadIds: ["thread-2", "thread-1"]
+  });
+
+  router.dispose();
+});
+
 test("loads persisted atom and global state values from desktop global state file", async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cw-router-test-"));
   t.after(async () => {
@@ -1458,6 +1622,50 @@ test("loads persisted atom and global state values from desktop global state fil
   assert.ok(globalStateEnvelope);
   assert.deepEqual(JSON.parse(globalStateEnvelope.payload.bodyJsonString), {
     value: { x: 10, y: 20, width: 1000, height: 700 }
+  });
+
+  router.dispose();
+});
+
+test("loads pinned thread ids from the desktop global state file", async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cw-router-pins-test-"));
+  t.after(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  const globalStatePath = path.join(tempDir, ".codex-global-state.json");
+  await fs.writeFile(globalStatePath, JSON.stringify({
+    "electron-pinned-thread-ids": ["thread-a", "thread-b"]
+  }));
+
+  const router = new MessageRouter({
+    appServer: null,
+    udsClient: null,
+    globalStatePath
+  });
+  const ws = createMockWs();
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "list-loaded-pinned",
+      method: "POST",
+      url: "vscode://codex/list-pinned-threads",
+      body: JSON.stringify({
+        params: {}
+      })
+    }
+  });
+
+  const response = ws.sent.find((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "fetch-response"
+    && entry.payload?.requestId === "list-loaded-pinned"
+  ));
+  assert.ok(response);
+  assert.deepEqual(JSON.parse(response.payload.bodyJsonString), {
+    threadIds: ["thread-a", "thread-b"]
   });
 
   router.dispose();

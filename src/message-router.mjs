@@ -89,6 +89,8 @@ const DEFAULT_HOTKEY_WINDOW_STATE = Object.freeze({
   isDevOverrideEnabled: false
 });
 
+const PINNED_THREAD_IDS_KEY = "electron-pinned-thread-ids";
+
 class TerminalRegistry {
   constructor(sendToWs, logger) {
     this.sendToWs = sendToWs;
@@ -813,6 +815,7 @@ export class MessageRouter {
     this.sharedObjects = new Map();
     this.sharedObjectSubscribers = new Map();
     this.lastAccountRead = null;
+    this.pinnedThreadIds = [];
     this.defaultWorkspaceRoot = process.cwd();
     this.workspaceRootOptions = {
       roots: [this.defaultWorkspaceRoot],
@@ -1739,11 +1742,23 @@ export class MessageRouter {
           break;
         }
         case "list-pinned-threads":
-          payload = { threadIds: [] };
+          payload = { threadIds: [...this.pinnedThreadIds] };
           break;
-        case "set-thread-pinned":
+        case "set-thread-pinned": {
+          const threadId = typeof params?.threadId === "string" ? params.threadId.trim() : "";
+          const pinned = params?.pinned !== false;
+          if (threadId) {
+            this._setThreadPinned(threadId, pinned);
+          }
           payload = { ok: true };
           break;
+        }
+        case "set-pinned-threads-order": {
+          const threadIds = Array.isArray(params?.threadIds) ? params.threadIds : [];
+          this._setPinnedThreadsOrder(threadIds);
+          payload = { ok: true };
+          break;
+        }
         case "extension-info":
           payload = {
             name: "codex-webstrapper",
@@ -2987,6 +3002,49 @@ export class MessageRouter {
         this.userSelectedActiveWorkspaceRoots = true;
       }
     }
+
+    const rawPinnedThreadIds = parsed[PINNED_THREAD_IDS_KEY];
+    if (Array.isArray(rawPinnedThreadIds)) {
+      this.pinnedThreadIds = this._normalizePinnedThreadIds(rawPinnedThreadIds);
+    }
+  }
+
+  _normalizePinnedThreadIds(threadIds) {
+    const normalized = [];
+    for (const threadId of threadIds) {
+      if (typeof threadId !== "string") {
+        continue;
+      }
+      const trimmed = threadId.trim();
+      if (!trimmed || normalized.includes(trimmed)) {
+        continue;
+      }
+      normalized.push(trimmed);
+    }
+    return normalized;
+  }
+
+  _persistPinnedThreadIds() {
+    this.globalState[PINNED_THREAD_IDS_KEY] = [...this.pinnedThreadIds];
+    this._scheduleGlobalStateWrite();
+    this.broadcastMainMessage({
+      type: "pinned-threads-updated"
+    });
+  }
+
+  _setThreadPinned(threadId, pinned) {
+    const current = this._normalizePinnedThreadIds(this.pinnedThreadIds);
+    const withoutThread = current.filter((entry) => entry !== threadId);
+    this.pinnedThreadIds = pinned ? [threadId, ...withoutThread] : withoutThread;
+    this._persistPinnedThreadIds();
+  }
+
+  _setPinnedThreadsOrder(threadIds) {
+    const requestedOrder = this._normalizePinnedThreadIds(threadIds);
+    const requestedSet = new Set(requestedOrder);
+    const remainder = this.pinnedThreadIds.filter((threadId) => !requestedSet.has(threadId));
+    this.pinnedThreadIds = [...requestedOrder, ...remainder];
+    this._persistPinnedThreadIds();
   }
 
   _isCwdInRoot(cwd, root) {
