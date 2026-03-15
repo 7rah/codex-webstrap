@@ -424,6 +424,45 @@ test("app-server messages include hostId for the active host", async () => {
   router.dispose();
 });
 
+test("uds thread stream broadcasts are forwarded to the browser bridge", () => {
+  const udsClient = new EventEmitter();
+  const router = new MessageRouter({ appServer: null, udsClient });
+  const ws = createMockWs();
+
+  router.registerClient(ws);
+  udsClient.emit("broadcast", {
+    method: "thread-stream-state-changed",
+    sourceClientId: "native-client-1",
+    version: 4,
+    params: {
+      conversationId: "thread-1",
+      change: {
+        type: "snapshot",
+        conversationState: {
+          id: "thread-1"
+        }
+      }
+    }
+  });
+
+  const forwarded = ws.sent.find((entry) => entry.payload?.type === "ipc-broadcast");
+  assert.ok(forwarded);
+  assert.equal(forwarded.payload.method, "thread-stream-state-changed");
+  assert.equal(forwarded.payload.sourceClientId, "native-client-1");
+  assert.equal(forwarded.payload.version, 4);
+  assert.deepEqual(forwarded.payload.params, {
+    conversationId: "thread-1",
+    change: {
+      type: "snapshot",
+      conversationState: {
+        id: "thread-1"
+      }
+    }
+  });
+
+  router.dispose();
+});
+
 test("archive-thread pre-signal does not invoke backend archive", async () => {
   let sendRequestCalls = 0;
   const appServer = {

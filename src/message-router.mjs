@@ -62,6 +62,7 @@ export const GRACEFUL_UNSUPPORTED_BUCKET = [
 
 const NATIVE_UNSUPPORTED = new Set(GRACEFUL_UNSUPPORTED_BUCKET);
 const IPC_BROADCAST_FORWARD_METHODS = new Set([
+  "thread-stream-state-changed",
   "thread-archived",
   "thread-unarchived",
   "thread-title-updated",
