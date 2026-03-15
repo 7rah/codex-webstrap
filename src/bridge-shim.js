@@ -18,6 +18,27 @@
     y: Math.floor(window.innerHeight / 2)
   };
 
+  function getRuntimeConfig() {
+    const config = window.__CODEX_WEBSTRAP_CONFIG;
+    return config && typeof config === "object" ? config : {};
+  }
+
+  function getSentryInitOptions() {
+    const config = getRuntimeConfig();
+    const sentryInitOptions = config.sentryInitOptions;
+    if (!sentryInitOptions || typeof sentryInitOptions !== "object") {
+      return null;
+    }
+    return {
+      dsn: null,
+      codexAppSessionId: null,
+      buildFlavor: "prod",
+      appVersion: null,
+      buildNumber: null,
+      ...sentryInitOptions
+    };
+  }
+
   function isSentryIpcUrl(input) {
     if (typeof input === "string") {
       return input.startsWith("sentry-ipc://");
@@ -902,12 +923,9 @@
       }
       return null;
     },
-    getSentryInitOptions: () => ({
-      dsn: null,
-      codexAppSessionId: null
-    }),
-    getAppSessionId: () => null,
-    getBuildFlavor: () => "prod"
+    getSentryInitOptions,
+    getAppSessionId: () => getSentryInitOptions()?.codexAppSessionId ?? null,
+    getBuildFlavor: () => getSentryInitOptions()?.buildFlavor ?? "prod"
   };
 
   window.codexWindowType = "electron";

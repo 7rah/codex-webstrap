@@ -150,12 +150,32 @@ export async function ensureExtractedAssets({
   };
 }
 
-export async function buildPatchedIndexHtml(indexPath) {
+function serializeRuntimeConfig(runtimeConfig) {
+  return JSON.stringify(runtimeConfig).replace(/</g, "\\u003c");
+}
+
+export function buildRuntimeConfigScript(runtimeConfig) {
+  return `window.__CODEX_WEBSTRAP_CONFIG = ${serializeRuntimeConfig(runtimeConfig)};\n`;
+}
+
+export async function buildPatchedIndexHtml(indexPath, { runtimeConfig = null } = {}) {
   let html = await fsp.readFile(indexPath, "utf8");
   const shimTag = '<script src="/__webstrapper/shim.js"></script>';
+  const hasShimTag = html.includes(shimTag);
+  const runtimeConfigTag = runtimeConfig
+    ? '<script src="/__webstrapper/runtime-config.js"></script>'
+    : "";
+  const hasRuntimeConfigTag = Boolean(runtimeConfigTag) && html.includes(runtimeConfigTag);
+  const injectedTags = runtimeConfigTag
+    ? `  ${runtimeConfigTag}\n  ${shimTag}`
+    : `  ${shimTag}`;
 
-  if (html.includes(shimTag)) {
+  if (hasShimTag && (!runtimeConfigTag || hasRuntimeConfigTag)) {
     return html;
+  }
+
+  if (hasShimTag && runtimeConfigTag && !hasRuntimeConfigTag) {
+    return html.replace(shimTag, `${runtimeConfigTag}\n  ${shimTag}`);
   }
 
   // Replace or inject mobile viewport meta — the Electron app's default
@@ -170,10 +190,10 @@ export async function buildPatchedIndexHtml(indexPath) {
   }
 
   if (html.includes("</head>")) {
-    return html.replace("</head>", `  ${shimTag}\n</head>`);
+    return html.replace("</head>", `${injectedTags}\n</head>`);
   }
 
-  return `${shimTag}\n${html}`;
+  return `${runtimeConfigTag ? `${runtimeConfigTag}\n` : ""}${shimTag}\n${html}`;
 }
 
 export async function readStaticFile(webRoot, requestPath) {

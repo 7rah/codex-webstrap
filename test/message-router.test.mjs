@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -112,6 +113,22 @@ test("show-context-menu is safely ignored", async () => {
     payload: {
       type: "show-context-menu",
       payload: { items: [] }
+    }
+  });
+
+  assert.equal(ws.sent.length, 0);
+  router.dispose();
+});
+
+test("hotkey-window-enabled-changed is safely ignored", async () => {
+  const router = new MessageRouter({ appServer: null, udsClient: null });
+  const ws = createMockWs();
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "hotkey-window-enabled-changed",
+      enabled: false
     }
   });
 
@@ -348,6 +365,52 @@ test("ready emits host_config shared object update", async () => {
 
   assert.ok(hostConfigEnvelope);
   assert.deepEqual(hostConfigEnvelope.payload.value, hostConfig);
+  router.dispose();
+});
+
+test("app-server messages include hostId for the active host", async () => {
+  const appServer = new EventEmitter();
+  appServer.getState = () => ({
+    connected: true,
+    initialized: true,
+    transportKind: "stdio"
+  });
+  appServer.sendRaw = async () => ({
+    id: "req-1",
+    result: { ok: true }
+  });
+
+  const router = new MessageRouter({ appServer, udsClient: null });
+  const ws = createMockWs();
+
+  router.registerClient(ws);
+  appServer.emit("notification", { method: "test/event", params: { ok: true } });
+  appServer.emit("request", { id: "server-1", method: "item/tool/requestUserInput", params: {} });
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "mcp-request",
+      request: {
+        id: "req-1",
+        method: "account/read",
+        params: { refreshToken: false }
+      }
+    }
+  });
+
+  const initialized = ws.sent.find((entry) => entry.payload?.type === "codex-app-server-initialized");
+  const connection = ws.sent.find((entry) => entry.payload?.type === "codex-app-server-connection-changed");
+  const notification = ws.sent.find((entry) => entry.payload?.type === "mcp-notification");
+  const request = ws.sent.find((entry) => entry.payload?.type === "mcp-request");
+  const response = ws.sent.find((entry) => entry.payload?.type === "mcp-response");
+
+  assert.equal(initialized.payload.hostId, "local");
+  assert.equal(connection.payload.hostId, "local");
+  assert.equal(notification.payload.hostId, "local");
+  assert.equal(request.payload.hostId, "local");
+  assert.equal(response.payload.hostId, "local");
+
   router.dispose();
 });
 

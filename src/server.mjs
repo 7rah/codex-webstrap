@@ -14,6 +14,7 @@ import {
 } from "./auth.mjs";
 import {
   buildPatchedIndexHtml,
+  buildRuntimeConfigScript,
   ensureCodexAppExists,
   ensureExtractedAssets,
   readBuildMetadata,
@@ -147,7 +148,19 @@ async function main() {
     buildKey: build.buildKey,
     logger
   });
-  const patchedIndexHtml = await buildPatchedIndexHtml(assetBundle.indexPath);
+  const runtimeConfig = {
+    sentryInitOptions: {
+      appVersion: build.shortVersion,
+      buildNumber: build.bundleVersion,
+      buildFlavor: "prod",
+      codexAppSessionId: null,
+      dsn: null
+    }
+  };
+  const patchedIndexHtml = await buildPatchedIndexHtml(assetBundle.indexPath, {
+    runtimeConfig
+  });
+  const runtimeConfigBody = buildRuntimeConfigScript(runtimeConfig);
 
   let codexCliPath = process.env.CODEX_CLI_PATH || codexPaths.codexCliPath;
   if (!process.env.CODEX_CLI_PATH) {
@@ -224,6 +237,13 @@ async function main() {
         res.statusCode = 200;
         res.setHeader("content-type", "application/javascript; charset=utf-8");
         res.end(shimBody);
+        return;
+      }
+
+      if (url.pathname === "/__webstrapper/runtime-config.js") {
+        res.statusCode = 200;
+        res.setHeader("content-type", "application/javascript; charset=utf-8");
+        res.end(runtimeConfigBody);
         return;
       }
 

@@ -829,25 +829,32 @@ export class MessageRouter {
     if (this.appServer) {
       this.appServer.on("initialized", () => {
         this.broadcastMainMessage({
-          type: "codex-app-server-initialized"
+          type: "codex-app-server-initialized",
+          hostId: this.hostConfig.id
         });
       });
 
       this.appServer.on("notification", (notification) => {
         this.broadcastMainMessage({
           type: "mcp-notification",
+          hostId: this.hostConfig.id,
           method: notification?.method,
           params: notification?.params ?? {}
         });
       });
 
       this.appServer.on("request", (request) => {
-        this.broadcastMainMessage({ type: "mcp-request", request });
+        this.broadcastMainMessage({
+          type: "mcp-request",
+          hostId: this.hostConfig.id,
+          request
+        });
       });
 
       this.appServer.on("connection-changed", (state) => {
         this.broadcastMainMessage({
           type: "codex-app-server-connection-changed",
+          hostId: this.hostConfig.id,
           state: state.connected ? "connected" : "disconnected",
           transport: state.transportKind
         });
@@ -884,12 +891,14 @@ export class MessageRouter {
       const state = this.appServer.getState();
       this.sendMainMessage(ws, {
         type: "codex-app-server-connection-changed",
+        hostId: this.hostConfig.id,
         state: state.connected ? "connected" : "disconnected",
         transport: state.transportKind
       });
       if (state.initialized) {
         this.sendMainMessage(ws, {
-          type: "codex-app-server-initialized"
+          type: "codex-app-server-initialized",
+          hostId: this.hostConfig.id
         });
       }
     }
@@ -1146,6 +1155,7 @@ export class MessageRouter {
         case "power-save-blocker-set":
         case "desktop-notification-show":
         case "desktop-notification-hide":
+        case "hotkey-window-enabled-changed":
         case "show-context-menu":
         case "inbox-item-set-read-state":
         case "codex-app-server-restart":
@@ -2741,6 +2751,7 @@ export class MessageRouter {
       });
       this.sendMainMessage(ws, {
         type: "mcp-response",
+        hostId: this.hostConfig.id,
         message: {
           id: response.id ?? payload.id,
           result: response.result,
