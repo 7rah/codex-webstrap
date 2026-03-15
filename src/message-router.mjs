@@ -2,7 +2,7 @@ import { spawn as childSpawn, spawnSync as childSpawnSync } from "node:child_pro
 import { Worker } from "node:worker_threads";
 import os from "node:os";
 import path from "node:path";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, statSync, watchFile, unwatchFile } from "node:fs";
 import fs from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
@@ -89,7 +89,33 @@ const DEFAULT_HOTKEY_WINDOW_STATE = Object.freeze({
   isDevOverrideEnabled: false
 });
 
-const PINNED_THREAD_IDS_KEY = "electron-pinned-thread-ids";
+const PINNED_THREAD_IDS_KEY = "pinned-thread-ids";
+const LEGACY_PINNED_THREAD_IDS_KEY = "electron-pinned-thread-ids";
+const GLOBAL_STATE_WATCH_INTERVAL_MS = 50;
+
+function arraysEqual(left, right) {
+  if (left === right) {
+    return true;
+  }
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) {
+    return false;
+  }
+  return left.every((value, index) => value === right[index]);
+}
+
+function stringRecordEqual(left, right) {
+  if (left === right) {
+    return true;
+  }
+
+  const leftEntries = Object.entries(left || {});
+  const rightEntries = Object.entries(right || {});
+  if (leftEntries.length !== rightEntries.length) {
+    return false;
+  }
+
+  return leftEntries.every(([key, value]) => right[key] === value);
+}
 
 class TerminalRegistry {
   constructor(sendToWs, logger) {
@@ -826,8 +852,10 @@ export class MessageRouter {
     this.globalStatePath = globalStatePath || path.join(os.homedir(), ".codex", ".codex-global-state.json");
     this.globalState = {};
     this.globalStateWriteTimer = null;
+    this.globalStateWatchListener = null;
     this._loadPersistedGlobalState();
     this._persistWorkspaceState({ writeToDisk: false });
+    this._watchGlobalState();
     this.sharedObjects.set("host_config", this.hostConfig);
 
     this.terminals = new TerminalRegistry((ws, payload) => {
@@ -848,6 +876,139 @@ export class MessageRouter {
     });
 
     this._wireBackends();
+  }
+
+  _watchGlobalState() {
+    if (!this.globalStatePath || this.globalStateWatchListener) {
+      return;
+    }
+
+    this.globalStateWatchListener = (current, previous) => {
+      if (current.mtimeMs === previous.mtimeMs && current.size === previous.size) {
+        return;
+      }
+      this._loadPersistedGlobalState({ broadcast: true });
+    };
+
+    watchFile(this.globalStatePath, {
+      interval: GLOBAL_STATE_WATCH_INTERVAL_MS,
+      persistent: false
+    }, this.globalStateWatchListener);
+  }
+
+  _readGlobalStateFromDisk() {
+    if (!this.globalStatePath) {
+      return null;
+    }
+
+    let parsed;
+    try {
+      parsed = JSON.parse(readFileSync(this.globalStatePath, "utf8"));
+    } catch {
+      return null;
+    }
+
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+
+    return parsed;
+  }
+
+  _extractWorkspaceRootOptions(parsed) {
+    const rawSavedRoots = parsed["electron-saved-workspace-roots"];
+    const rawLabels = parsed["electron-workspace-root-labels"];
+
+    let savedRoots = [];
+    if (Array.isArray(rawSavedRoots)) {
+      savedRoots = rawSavedRoots;
+    } else if (rawSavedRoots && typeof rawSavedRoots === "object" && Array.isArray(rawSavedRoots.roots)) {
+      savedRoots = rawSavedRoots.roots;
+    }
+
+    const normalizedSavedRoots = [...new Set(
+      savedRoots
+        .map((root) => this._normalizeWorkspaceRoot(root))
+        .filter(Boolean)
+    )];
+
+    if (normalizedSavedRoots.length === 0) {
+      return null;
+    }
+
+    const labels = rawLabels && typeof rawLabels === "object"
+      ? rawLabels
+      : rawSavedRoots && typeof rawSavedRoots === "object" && rawSavedRoots.labels && typeof rawSavedRoots.labels === "object"
+        ? rawSavedRoots.labels
+        : {};
+
+    return {
+      roots: normalizedSavedRoots,
+      labels
+    };
+  }
+
+  _extractActiveWorkspaceRoots(parsed) {
+    const rawActiveRoots = parsed["active-workspace-roots"];
+    if (!Array.isArray(rawActiveRoots)) {
+      return null;
+    }
+
+    const normalizedActiveRoots = [...new Set(
+      rawActiveRoots
+        .map((root) => this._normalizeWorkspaceRoot(root))
+        .filter(Boolean)
+    )];
+
+    return normalizedActiveRoots.length > 0 ? normalizedActiveRoots : null;
+  }
+
+  _extractPinnedThreadIds(parsed) {
+    const rawPinnedThreadIds = Array.isArray(parsed[PINNED_THREAD_IDS_KEY])
+      ? parsed[PINNED_THREAD_IDS_KEY]
+      : Array.isArray(parsed[LEGACY_PINNED_THREAD_IDS_KEY])
+        ? parsed[LEGACY_PINNED_THREAD_IDS_KEY]
+        : null;
+
+    return Array.isArray(rawPinnedThreadIds)
+      ? this._normalizePinnedThreadIds(rawPinnedThreadIds)
+      : null;
+  }
+
+  _cloneWorkspaceRootOptions(options) {
+    return {
+      roots: Array.isArray(options?.roots) ? [...options.roots] : [],
+      labels: options?.labels && typeof options.labels === "object" ? { ...options.labels } : {}
+    };
+  }
+
+  _broadcastGlobalStateChanges({
+    previousPinnedThreadIds,
+    previousWorkspaceRootOptions,
+    previousActiveWorkspaceRoots
+  }) {
+    if (!arraysEqual(this.pinnedThreadIds, previousPinnedThreadIds)) {
+      this.broadcastMainMessage({
+        type: "pinned-threads-updated"
+      });
+    }
+
+    if (
+      !arraysEqual(this.workspaceRootOptions.roots, previousWorkspaceRootOptions.roots)
+      || !stringRecordEqual(this.workspaceRootOptions.labels, previousWorkspaceRootOptions.labels)
+    ) {
+      this.broadcastMainMessage({
+        type: "workspace-root-options-updated",
+        options: this.workspaceRootOptions.roots
+      });
+    }
+
+    if (!arraysEqual(this.activeWorkspaceRoots, previousActiveWorkspaceRoots)) {
+      this.broadcastMainMessage({
+        type: "active-workspace-roots-updated",
+        roots: this.activeWorkspaceRoots
+      });
+    }
   }
 
   _wireBackends() {
@@ -944,6 +1105,11 @@ export class MessageRouter {
       clearTimeout(this.globalStateWriteTimer);
       this.globalStateWriteTimer = null;
       void this._writeGlobalStateToDisk();
+    }
+
+    if (this.globalStatePath && this.globalStateWatchListener) {
+      unwatchFile(this.globalStatePath, this.globalStateWatchListener);
+      this.globalStateWatchListener = null;
     }
 
     this.terminals.dispose();
@@ -2937,23 +3103,22 @@ export class MessageRouter {
     return this._parseTomlString(sectionBody, key);
   }
 
-  _loadPersistedGlobalState() {
-    if (!this.globalStatePath) {
+  _loadPersistedGlobalState({ broadcast = false } = {}) {
+    const parsed = this._readGlobalStateFromDisk();
+    if (!parsed) {
       return;
     }
 
-    let parsed;
-    try {
-      parsed = JSON.parse(readFileSync(this.globalStatePath, "utf8"));
-    } catch {
-      return;
-    }
-
-    if (!parsed || typeof parsed !== "object") {
-      return;
-    }
+    const previousPinnedThreadIds = [...this.pinnedThreadIds];
+    const previousWorkspaceRootOptions = this._cloneWorkspaceRootOptions(this.workspaceRootOptions);
+    const previousActiveWorkspaceRoots = [...this.activeWorkspaceRoots];
 
     this.globalState = parsed;
+    if (Object.prototype.hasOwnProperty.call(this.globalState, LEGACY_PINNED_THREAD_IDS_KEY)) {
+      delete this.globalState[LEGACY_PINNED_THREAD_IDS_KEY];
+    }
+
+    this.persistedAtomState = new Map();
 
     const persistedAtoms = parsed["electron-persisted-atom-state"];
     if (persistedAtoms && typeof persistedAtoms === "object" && !Array.isArray(persistedAtoms)) {
@@ -2962,50 +3127,34 @@ export class MessageRouter {
       }
     }
 
-    const rawSavedRoots = parsed["electron-saved-workspace-roots"];
-    const rawActiveRoots = parsed["active-workspace-roots"];
-    const rawLabels = parsed["electron-workspace-root-labels"];
-
-    let savedRoots = [];
-    if (Array.isArray(rawSavedRoots)) {
-      savedRoots = rawSavedRoots;
-    } else if (rawSavedRoots && typeof rawSavedRoots === "object" && Array.isArray(rawSavedRoots.roots)) {
-      savedRoots = rawSavedRoots.roots;
+    const workspaceRootOptions = this._extractWorkspaceRootOptions(parsed);
+    if (workspaceRootOptions) {
+      this.workspaceRootOptions = workspaceRootOptions;
     }
 
-    const normalizedSavedRoots = [...new Set(
-      savedRoots
-        .map((root) => this._normalizeWorkspaceRoot(root))
-        .filter(Boolean)
-    )];
-
-    if (normalizedSavedRoots.length > 0) {
-      const labels = rawLabels && typeof rawLabels === "object"
-        ? rawLabels
-        : rawSavedRoots && typeof rawSavedRoots === "object" && rawSavedRoots.labels && typeof rawSavedRoots.labels === "object"
-          ? rawSavedRoots.labels
-          : {};
-      this.workspaceRootOptions = {
-        roots: normalizedSavedRoots,
-        labels
-      };
+    const activeWorkspaceRoots = this._extractActiveWorkspaceRoots(parsed);
+    if (activeWorkspaceRoots) {
+      this.activeWorkspaceRoots = activeWorkspaceRoots;
+      this.userSelectedActiveWorkspaceRoots = true;
+    } else {
+      this.userSelectedActiveWorkspaceRoots = false;
     }
 
-    if (Array.isArray(rawActiveRoots)) {
-      const normalizedActiveRoots = [...new Set(
-        rawActiveRoots
-          .map((root) => this._normalizeWorkspaceRoot(root))
-          .filter(Boolean)
-      )];
-      if (normalizedActiveRoots.length > 0) {
-        this.activeWorkspaceRoots = normalizedActiveRoots;
-        this.userSelectedActiveWorkspaceRoots = true;
-      }
+    const pinnedThreadIds = this._extractPinnedThreadIds(parsed);
+    if (pinnedThreadIds) {
+      this.pinnedThreadIds = pinnedThreadIds;
+    } else {
+      this.pinnedThreadIds = [];
     }
 
-    const rawPinnedThreadIds = parsed[PINNED_THREAD_IDS_KEY];
-    if (Array.isArray(rawPinnedThreadIds)) {
-      this.pinnedThreadIds = this._normalizePinnedThreadIds(rawPinnedThreadIds);
+    this._persistWorkspaceState({ writeToDisk: false });
+
+    if (broadcast) {
+      this._broadcastGlobalStateChanges({
+        previousPinnedThreadIds,
+        previousWorkspaceRootOptions,
+        previousActiveWorkspaceRoots
+      });
     }
   }
 
@@ -3026,6 +3175,7 @@ export class MessageRouter {
 
   _persistPinnedThreadIds() {
     this.globalState[PINNED_THREAD_IDS_KEY] = [...this.pinnedThreadIds];
+    delete this.globalState[LEGACY_PINNED_THREAD_IDS_KEY];
     this._scheduleGlobalStateWrite();
     this.broadcastMainMessage({
       type: "pinned-threads-updated"

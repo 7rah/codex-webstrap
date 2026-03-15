@@ -22,6 +22,16 @@ function createMockWs() {
   };
 }
 
+async function waitFor(condition, { attempts = 100, intervalMs = 10 } = {}) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    if (await condition()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  assert.ok(await condition(), "condition was not met before timeout");
+}
+
 test("bucket coverage includes required representative messages", () => {
   assert.ok(FULL_HANDLING_BUCKET.includes("ready"));
   assert.ok(FULL_HANDLING_BUCKET.includes("mcp-request"));
@@ -1395,8 +1405,16 @@ test("thread list responses are filtered to saved workspace roots", async () => 
   router.dispose();
 });
 
-test("set-thread-pinned persists pinned thread ids and broadcasts an update", async () => {
-  const router = new MessageRouter({ appServer: null, udsClient: null });
+test("set-thread-pinned persists pinned thread ids and broadcasts an update", async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cw-router-pin-state-test-"));
+  t.after(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  const globalStatePath = path.join(tempDir, ".codex-global-state.json");
+  await fs.writeFile(globalStatePath, JSON.stringify({}));
+
+  const router = new MessageRouter({ appServer: null, udsClient: null, globalStatePath });
   const ws = createMockWs();
   router.registerClient(ws);
   ws.sent = [];
@@ -1496,8 +1514,16 @@ test("set-thread-pinned persists pinned thread ids and broadcasts an update", as
   router.dispose();
 });
 
-test("set-pinned-threads-order updates the stored pin order", async () => {
-  const router = new MessageRouter({ appServer: null, udsClient: null });
+test("set-pinned-threads-order updates the stored pin order", async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cw-router-pin-order-test-"));
+  t.after(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  const globalStatePath = path.join(tempDir, ".codex-global-state.json");
+  await fs.writeFile(globalStatePath, JSON.stringify({}));
+
+  const router = new MessageRouter({ appServer: null, udsClient: null, globalStatePath });
   const ws = createMockWs();
 
   for (const threadId of ["thread-1", "thread-2"]) {
@@ -1627,7 +1653,7 @@ test("loads persisted atom and global state values from desktop global state fil
   router.dispose();
 });
 
-test("loads pinned thread ids from the desktop global state file", async (t) => {
+test("loads pinned thread ids from the native desktop global state key", async (t) => {
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cw-router-pins-test-"));
   t.after(async () => {
     await fs.rm(tempDir, { recursive: true, force: true });
@@ -1635,7 +1661,7 @@ test("loads pinned thread ids from the desktop global state file", async (t) => 
 
   const globalStatePath = path.join(tempDir, ".codex-global-state.json");
   await fs.writeFile(globalStatePath, JSON.stringify({
-    "electron-pinned-thread-ids": ["thread-a", "thread-b"]
+    "pinned-thread-ids": ["thread-a", "thread-b"]
   }));
 
   const router = new MessageRouter({
@@ -1666,6 +1692,184 @@ test("loads pinned thread ids from the desktop global state file", async (t) => 
   assert.ok(response);
   assert.deepEqual(JSON.parse(response.payload.bodyJsonString), {
     threadIds: ["thread-a", "thread-b"]
+  });
+
+  router.dispose();
+});
+
+test("set-thread-pinned persists the native desktop global state key", async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cw-router-pin-persist-test-"));
+  t.after(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  const globalStatePath = path.join(tempDir, ".codex-global-state.json");
+  const router = new MessageRouter({
+    appServer: null,
+    udsClient: null,
+    globalStatePath
+  });
+  const ws = createMockWs();
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "pin-native-key",
+      method: "POST",
+      url: "vscode://codex/set-thread-pinned",
+      body: JSON.stringify({
+        params: {
+          threadId: "thread-native",
+          pinned: true
+        }
+      })
+    }
+  });
+
+  await waitFor(async () => {
+    try {
+      const raw = await fs.readFile(globalStatePath, "utf8");
+      const parsed = JSON.parse(raw);
+      return Array.isArray(parsed["pinned-thread-ids"]);
+    } catch {
+      return false;
+    }
+  });
+
+  const parsed = JSON.parse(await fs.readFile(globalStatePath, "utf8"));
+  assert.deepEqual(parsed["pinned-thread-ids"], ["thread-native"]);
+  assert.equal(Object.prototype.hasOwnProperty.call(parsed, "electron-pinned-thread-ids"), false);
+
+  router.dispose();
+});
+
+test("reloads pinned thread ids and workspace ordering when desktop global state changes", async (t) => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cw-router-global-sync-test-"));
+  t.after(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  const globalStatePath = path.join(tempDir, ".codex-global-state.json");
+  await fs.writeFile(globalStatePath, JSON.stringify({
+    "pinned-thread-ids": ["thread-a"],
+    "electron-saved-workspace-roots": ["/repo/a", "/repo/b"],
+    "active-workspace-roots": ["/repo/a"],
+    "electron-workspace-root-labels": {
+      "/repo/a": "Repo A",
+      "/repo/b": "Repo B"
+    }
+  }));
+
+  const router = new MessageRouter({
+    appServer: null,
+    udsClient: null,
+    globalStatePath
+  });
+  const ws = createMockWs();
+  router.registerClient(ws);
+  ws.sent = [];
+
+  await fs.writeFile(globalStatePath, JSON.stringify({
+    "pinned-thread-ids": ["thread-b", "thread-a"],
+    "electron-saved-workspace-roots": ["/repo/b", "/repo/a", "/repo/c"],
+    "active-workspace-roots": ["/repo/b"],
+    "electron-workspace-root-labels": {
+      "/repo/a": "Repo A",
+      "/repo/b": "Repo Bee",
+      "/repo/c": "Repo C"
+    }
+  }));
+
+  await waitFor(() => ws.sent.some((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "pinned-threads-updated"
+  )));
+  await waitFor(() => ws.sent.some((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "workspace-root-options-updated"
+    && Array.isArray(entry.payload?.options)
+    && entry.payload.options.join(",") === "/repo/b,/repo/a,/repo/c"
+  )));
+  await waitFor(() => ws.sent.some((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "active-workspace-roots-updated"
+    && Array.isArray(entry.payload?.roots)
+    && entry.payload.roots.join(",") === "/repo/b"
+  )));
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "list-synced-pinned",
+      method: "POST",
+      url: "vscode://codex/list-pinned-threads",
+      body: JSON.stringify({
+        params: {}
+      })
+    }
+  });
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "workspace-root-options-sync",
+      method: "POST",
+      url: "vscode://codex/workspace-root-options",
+      body: JSON.stringify({
+        params: {}
+      })
+    }
+  });
+
+  await router.handleEnvelope(ws, {
+    type: "view-message",
+    payload: {
+      type: "fetch",
+      requestId: "active-workspace-roots-sync",
+      method: "POST",
+      url: "vscode://codex/active-workspace-roots",
+      body: JSON.stringify({
+        params: {}
+      })
+    }
+  });
+
+  const pinnedResponse = ws.sent.find((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "fetch-response"
+    && entry.payload?.requestId === "list-synced-pinned"
+  ));
+  assert.ok(pinnedResponse);
+  assert.deepEqual(JSON.parse(pinnedResponse.payload.bodyJsonString), {
+    threadIds: ["thread-b", "thread-a"]
+  });
+
+  const workspaceResponse = ws.sent.find((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "fetch-response"
+    && entry.payload?.requestId === "workspace-root-options-sync"
+  ));
+  assert.ok(workspaceResponse);
+  assert.deepEqual(JSON.parse(workspaceResponse.payload.bodyJsonString), {
+    roots: ["/repo/b", "/repo/a", "/repo/c"],
+    labels: {
+      "/repo/a": "Repo A",
+      "/repo/b": "Repo Bee",
+      "/repo/c": "Repo C"
+    }
+  });
+
+  const activeRootsResponse = ws.sent.find((entry) => (
+    entry.type === "main-message"
+    && entry.payload?.type === "fetch-response"
+    && entry.payload?.requestId === "active-workspace-roots-sync"
+  ));
+  assert.ok(activeRootsResponse);
+  assert.deepEqual(JSON.parse(activeRootsResponse.payload.bodyJsonString), {
+    roots: ["/repo/b"]
   });
 
   router.dispose();
