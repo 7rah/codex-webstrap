@@ -3,6 +3,7 @@ import fsp from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 import { safePathJoin, toErrorMessage } from "./util.mjs";
 
@@ -27,6 +28,22 @@ const CONTENT_TYPES = {
   ".mjs.map": "application/json; charset=utf-8",
   ".js.map": "application/json; charset=utf-8"
 };
+
+const LOCAL_FILE_CONTENT_TYPES = new Set([
+  "image/svg+xml",
+  "image/png",
+  "image/jpeg",
+  "image/gif",
+  "image/webp",
+  "image/x-icon"
+]);
+
+const RESERVED_WEB_PATH_PREFIXES = [
+  "/assets/",
+  "/__webstrapper/",
+  "/favicon.ico",
+  "/index.html"
+];
 
 export function defaultCacheRoot() {
   return path.join(os.homedir(), ".cache", "codex-webstrap", "assets");
@@ -219,4 +236,69 @@ export async function readStaticFile(webRoot, requestPath) {
   } catch (error) {
     throw new Error(`Failed reading asset ${filePath}: ${toErrorMessage(error)}`);
   }
+}
+
+export function resolveLocalFileReference(reference) {
+  if (typeof reference !== "string" || reference.length === 0) {
+    return null;
+  }
+
+  let filePath = null;
+  if (reference.startsWith("file://")) {
+    try {
+      filePath = fileURLToPath(reference);
+    } catch {
+      return null;
+    }
+  } else {
+    let decoded = reference;
+    try {
+      decoded = decodeURIComponent(reference);
+    } catch {
+      decoded = reference;
+    }
+
+    if (RESERVED_WEB_PATH_PREFIXES.some((prefix) => decoded === prefix || decoded.startsWith(prefix))) {
+      return null;
+    }
+
+    if (!path.isAbsolute(decoded)) {
+      return null;
+    }
+
+    filePath = path.normalize(decoded);
+  }
+
+  const contentType = CONTENT_TYPES[path.extname(filePath).toLowerCase()];
+  if (!LOCAL_FILE_CONTENT_TYPES.has(contentType)) {
+    return null;
+  }
+
+  return filePath;
+}
+
+export async function readLocalFileReference(reference) {
+  const filePath = resolveLocalFileReference(reference);
+  if (!filePath) {
+    return null;
+  }
+
+  const stat = await fsp
+    .stat(filePath)
+    .catch(() => null);
+  if (!stat || !stat.isFile()) {
+    return null;
+  }
+
+  const contentType = CONTENT_TYPES[path.extname(filePath).toLowerCase()];
+  if (!LOCAL_FILE_CONTENT_TYPES.has(contentType)) {
+    return null;
+  }
+
+  const body = await fsp.readFile(filePath);
+  return {
+    body,
+    contentType,
+    filePath
+  };
 }

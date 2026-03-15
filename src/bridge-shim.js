@@ -253,6 +253,82 @@
     };
   }
 
+  function fileUrlToRequestPath(value) {
+    if (typeof value !== "string" || !value.startsWith("file://")) {
+      return null;
+    }
+
+    try {
+      const parsed = new URL(value);
+      return parsed.pathname || null;
+    } catch {
+      return null;
+    }
+  }
+
+  function rewriteLocalFileImageElement(element) {
+    if (!element || typeof element.getAttribute !== "function" || typeof element.setAttribute !== "function") {
+      return;
+    }
+
+    const rawSrc = element.getAttribute("src");
+    const requestPath = fileUrlToRequestPath(rawSrc);
+    if (!requestPath || rawSrc === requestPath) {
+      return;
+    }
+
+    element.setAttribute("src", requestPath);
+  }
+
+  function rewriteLocalFileImages(root) {
+    if (!root || typeof root.querySelectorAll !== "function") {
+      return;
+    }
+
+    if (typeof root.matches === "function" && root.matches("img[src], source[src]")) {
+      rewriteLocalFileImageElement(root);
+    }
+
+    root.querySelectorAll("img[src], source[src]").forEach((element) => {
+      rewriteLocalFileImageElement(element);
+    });
+  }
+
+  function installLocalFileImageBridge() {
+    const start = () => {
+      rewriteLocalFileImages(document);
+
+      const observer = new MutationObserver((mutations) => {
+        mutations.forEach((mutation) => {
+          if (mutation.type === "attributes" && mutation.target instanceof Element) {
+            rewriteLocalFileImageElement(mutation.target);
+            return;
+          }
+
+          mutation.addedNodes.forEach((node) => {
+            if (node instanceof Element) {
+              rewriteLocalFileImages(node);
+            }
+          });
+        });
+      });
+
+      observer.observe(document.documentElement || document.body, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        attributeFilter: ["src"]
+      });
+    };
+
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", start, { once: true });
+      return;
+    }
+
+    start();
+  }
+
   function ensureContextMenuStyles() {
     if (document.getElementById(CONTEXT_MENU_STYLE_ID)) {
       return;
@@ -931,6 +1007,7 @@
   window.codexWindowType = "electron";
   window.electronBridge = electronBridge;
   installBrowserCompatibilityShims();
+  installLocalFileImageBridge();
   ensureMobileStyles();
   installViewportStabilizer();
   autoCollapseSidebarOnMobile();
